@@ -11,41 +11,40 @@ import (
 )
 
 func main() {
-	// Get a new client
-	consul, err := api.NewClient(api.DefaultConfig())
+	consul, _ := api.NewClient(api.DefaultConfig())
+
+	splitRegex := regexp.MustCompile(":")
+	upstreamRegex := regexp.MustCompile("[^\\w]+")
+
+	upstreams := make(map[string][]map[string]interface{})
+	servers := make(map[string]map[string]map[string]string)
+
+	allServices, _, err := consul.Catalog().Services(&api.QueryOptions{})
 	if err != nil {
 		panic(err)
 	}
 
-	re := regexp.MustCompile(":")
-	output := make(map[string]map[string][]map[string]interface{})
-
-	servs, _, err := consul.Catalog().Services(&api.QueryOptions{})
-	if err != nil {
-		panic(err)
-	}
-
-	for s, tags := range servs {
-		isHost := false
+	for s, tags := range allServices {
+		hasHost := false
 		for _, tag := range tags {
 			if strings.HasPrefix(tag, "host:") {
-				isHost = true
+				hasHost = true
 				break
 			}
 		}
 
-		if isHost {
+		if hasHost {
 			services, _, err := consul.Health().Service(s, "", true, &api.QueryOptions{})
 			if err != nil {
 				panic(err)
 			}
 
 			for _, serv := range services {
-				attrs := make(map[string]string)
+				params := make(map[string]string)
 				for _, t := range serv.Service.Tags {
-					tt := re.Split(t, 2)
+					tt := splitRegex.Split(t, 2)
 					if len(tt) > 1 {
-						attrs[tt[0]] = tt[1]
+						params[tt[0]] = tt[1]
 					}
 				}
 
@@ -54,38 +53,47 @@ func main() {
 					address = serv.Service.Address
 				}
 
-				location, ok := attrs["location"]
+				location, ok := params["location"]
 				if ok == false {
 					location = "/"
 				}
 
-				if _, ok := output[attrs["host"]]; ok == false {
-					output[attrs["host"]] = make(map[string][]map[string]interface{}, 0)
+				staging, ok := params["staging"]
+				if ok == false {
+					staging = "live"
 				}
 
-				if _, ok := output[attrs["host"]][location]; ok == false {
-					output[attrs["host"]][location] = make([]map[string]interface{}, 0)
+				upstream := upstreamRegex.ReplaceAllString("ups_"+params["host"]+"_"+location+"_"+staging, "_")
+
+				if _, ok := upstreams[upstream]; ok == false {
+					upstreams[upstream] = make([]map[string]interface{}, 0)
 				}
 
-				output[attrs["host"]][location] = append(output[attrs["host"]][location], map[string]interface{}{
+				upstreams[upstream] = append(upstreams[upstream], map[string]interface{}{
 					"address": address,
 					"port":    serv.Service.Port,
-					"staging": attrs["staging"],
 				})
+
+				if _, ok := servers[params["host"]]; ok == false {
+					servers[params["host"]] = make(map[string]map[string]string, 0)
+				}
+
+				if _, ok := servers[params["host"]][location]; ok == false {
+					servers[params["host"]][location] = make(map[string]string, 0)
+				}
+
+				if _, ok := servers[params["host"]][location][staging]; ok == false {
+					servers[params["host"]][location][staging] = upstream
+				}
 			}
 		}
 	}
 
-	// cleanup empty or only live staging routes
-	for _, hs := range output {
-		for _, ls := range hs {
-			if len(ls) == 1 && ls[0]["staging"] != "stage" {
-				delete(ls[0], "staging")
-			}
-		}
-	}
+	out, _ := json.MarshalIndent(map[string]interface{}{
+		"upstreams": upstreams,
+		"servers":   servers,
+	}, "", "  ")
 
-	out, _ := json.MarshalIndent(output, "", "  ")
 	fmt.Fprintln(os.Stdout, string(out))
 	os.Exit(0)
 }
