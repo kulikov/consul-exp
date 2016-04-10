@@ -1,0 +1,18 @@
+{{- with $hosts := plugin "/Users/kulikov/Work/inn/staff/consul/bin/nginx_tree" | parseJSON}}
+{{range $host, $locations := $hosts}}
+server {
+  listen 80;
+  server_name {{$host}};
+
+  {{range $location, $services := $locations}}
+  location {{$location}} {
+  {{- range $s := $services}}
+    {{if $s.staging -}} if ($is_staging = "{{$s.staging}}") { {{end}}
+      proxy_pass http://{{$s.address}}:{{$s.port}}
+    {{if $s.staging -}} } {{end}}
+  {{- end}}
+  }
+  {{end}}
+}
+{{end}}
+{{end}}
